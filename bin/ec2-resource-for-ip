@@ -1,0 +1,105 @@
+#!/bin/bash
+
+die() { echo "$@" 1>&2; exit 1; }
+
+[ $# -gt 0 ] || die "IP(s) expected"
+
+ec2_instance() {
+  local ip=$1
+  local internal=$2
+
+  local filter_name=$(
+    if [ "$internal" == "internal" ]; then
+      echo private-ip-address
+    else
+      echo ip-address
+    fi
+  )
+  local output=$(
+    aws ec2 describe-instances \
+      --filter Name=$filter_name,Values="$ip" \
+      --query 'Reservations[0].Instances[0]' \
+        2>/dev/null
+  )
+  [ -n "$output" ] || return 1
+  [ "$output" != "[]" ] || return 2
+
+  local resource_id=$(
+    echo "$output" | jq -r '.InstanceId' 2>/dev/null
+  )
+  [ -n "$resource_id" ] || return 3
+  [ "$resource_id" != "null" ] || return 4
+
+  echo "$ip:"
+  echo "  type: ec2_instance"
+  echo "  id:   $resource_id"
+
+  local resource_name=$(
+    echo "$output" | jq -r '.Tags[]|select(.Key=="Name").Value' 2>/dev/null
+  )
+
+  if [ -n "$resource_name" ]; then
+    echo "  name: $resource_name"
+  fi
+}
+
+ELB_INFO() {
+  if [ -n "$ELB_INFO" ]; then
+    echo "$ELB_INFO"
+    return 0
+  fi
+
+  local all_elbs=$(
+    aws elb describe-load-balancers --query LoadBalancerDescriptions
+  )
+  local elb_name_dns=$(
+    echo "$all_elbs" \
+      | jq -c '.[] | { name: .LoadBalancerName, dns: .DNSName }'
+  )
+
+  ELB_INFO=
+  for elb in $elb_name_dns; do
+    local ips=$(
+      echo $(dig +short "$(echo "$elb" | jq -r .dns)") | sed -e 's/ /","/'
+    )
+    if [ -n "$ips" ]; then
+      ips="\"$ips\""
+    fi
+    ELB_INFO=$(
+      printf "%s\n%s,\"ips\":[%s]}" \
+        "$ELB_INFO" \
+        "$(echo "$elb" | sed -e 's/\}$//')" \
+        "$ips"
+    )
+  done
+  echo "$ELB_INFO"
+}
+
+elb() {
+  local ip=$1
+
+  local match=$( ELB_INFO | grep "\"$ip\"" )
+  [ -n "$match" ] || return 1
+
+  echo "$ip:"
+  echo "  type: elb"
+  echo "  name: $(echo "$match" | jq -r '.name')"
+}
+
+unknown() {
+  local ip=$1
+  echo "$ip:"
+  echo "  type: unknown"
+}
+
+search_region() {
+  local region=$1
+  local ip=$2
+  export AWS_DEFAULT_REGION=$region
+  ec2_instance "$ip" "internal" || ec2_instance "$ip" "external" || elb "$ip"
+}
+
+for ip in "$@"; do
+  search_region "us-east-1" "$ip" || search_region "us-west-1" "$ip" || unknown "$ip"
+done
+
