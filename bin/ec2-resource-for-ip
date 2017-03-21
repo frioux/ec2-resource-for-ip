@@ -109,6 +109,7 @@ unknown() {
 search_region() {
   local region=$1
   local ip=$2
+  export AWS_DEFAULT_REGION=$region
   ec2_instance "$ip" "internal" || ec2_instance "$ip" "external" || elb "$ip" || eip "$ip"
 }
 
