@@ -86,6 +86,20 @@ elb() {
   echo "  name: $(echo "$match" | jq -r '.name')"
 }
 
+eip() {
+  local ip=$1
+
+  local output=$(
+    aws ec2 describe-addresses --filters Name=public-ip,Values=$ip | jq '.Addresses[]'
+  )
+
+  [ -n "$output" ] || return 1
+
+  echo "$ip:"
+  echo "  type: eip"
+  echo "  id:   $(echo "$output" | jq -r ".AllocationId")"
+}
+
 unknown() {
   local ip=$1
   echo "$ip:"
@@ -95,8 +109,7 @@ unknown() {
 search_region() {
   local region=$1
   local ip=$2
-  export AWS_DEFAULT_REGION=$region
-  ec2_instance "$ip" "internal" || ec2_instance "$ip" "external" || elb "$ip"
+  ec2_instance "$ip" "internal" || ec2_instance "$ip" "external" || elb "$ip" || eip "$ip"
 }
 
 for ip in "$@"; do
