@@ -104,6 +104,7 @@ unknown() {
   local ip=$1
   echo "$ip:"
   echo "  type: unknown"
+  echo "  ptr: $(dig +short $(perl -E'say (join(".", reverse split /\./, shift) .  ".in-addr.arpa")' $ip) ptr)"
 }
 
 search_region() {
