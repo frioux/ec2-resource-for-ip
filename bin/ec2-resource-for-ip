@@ -32,6 +32,7 @@ ec2_instance() {
 
   echo "$ip:"
   echo "  type: ec2_instance"
+  echo "  region: $AWS_DEFAULT_REGION"
   echo "  id:   $resource_id"
 
   local resource_name=$(
@@ -83,6 +84,7 @@ elb() {
 
   echo "$ip:"
   echo "  type: elb"
+  echo "  region: $AWS_DEFAULT_REGION"
   echo "  name: $(echo "$match" | jq -r '.name')"
 }
 
@@ -97,6 +99,7 @@ eip() {
 
   echo "$ip:"
   echo "  type: eip"
+  echo "  region: $AWS_DEFAULT_REGION"
   echo "  id:   $(echo "$output" | jq -r ".AllocationId")"
 }
 
