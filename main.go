@@ -6,6 +6,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/elb"
+	"net"
 	"os/exec"
 	"strings"
 )
@@ -69,14 +71,25 @@ func main() {
 				fmt.Print(ip + ":\n" + str)
 			}
 		}
-	}
 
+		found, err = find_elb(region, sess, ips)
+		if err != nil {
+			if *verbose {
+				fmt.Println(err)
+			}
+		} else {
+			for ip, str := range found {
+				delete(foundIps, ip)
+				fmt.Print(ip + ":\n" + str)
+			}
+		}
+	}
 
 	keys := make([]string, len(foundIps))
 	i := 0
 	for k := range foundIps {
-		 keys[i] = k
-		 i++
+		keys[i] = k
+		i++
 	}
 
 	found, err := unknown(keys)
@@ -96,7 +109,47 @@ func main() {
 	}
 }
 
-func elb(ip string) {}
+func find_elb(region string, sess *session.Session, ips []string) (map[string]string, error) {
+	svc := elb.New(sess, &aws.Config{Region: aws.String(region)})
+
+	// map of ip to elb-id
+	lookup := make(map[string]string)
+
+	resp, err := svc.DescribeLoadBalancers(nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	for _, lb := range resp.LoadBalancerDescriptions {
+		ips, err := net.LookupIP(*lb.DNSName)
+
+		// This happens all the time; do not early exit
+		if err != nil {
+			if *verbose {
+				fmt.Println(err)
+			}
+			continue
+		}
+
+		name := *lb.LoadBalancerName
+		for _, ip := range ips {
+			lookup[ip.String()] = name
+		}
+	}
+
+	ret := make(map[string]string)
+	for _, ip := range ips {
+		if name, ok := lookup[ip]; ok {
+			ret[ip] = fmt.Sprintf(
+				"  type: elb\n"+
+					"  region: %s\n"+
+					"  name: %s\n", region, name)
+		}
+	}
+
+	return ret, nil
+}
 
 func eip(region string, sess *session.Session, ips []string) (map[string]string, error) {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
