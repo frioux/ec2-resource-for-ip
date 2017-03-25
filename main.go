@@ -158,6 +158,15 @@ func unknown(ips []string) (map[string]string, error) {
 	return ret, nil
 }
 
+func getEC2Name(i *ec2.Instance) string {
+	for _, tag := range i.Tags {
+		if *tag.Key == "Name" {
+			return *tag.Value
+		}
+	}
+	return ""
+}
+
 func ec2_instance_public(region string, sess *session.Session, ips []string) (map[string]string, error) {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
 
@@ -187,7 +196,9 @@ func ec2_instance_public(region string, sess *session.Session, ips []string) (ma
 			ret[*instance.PublicIpAddress] = fmt.Sprintf(
 				"  type: ec2_instance\n"+
 					"  region: %s\n"+
-					"  id: %s\n", region, *instance.InstanceId)
+					"  id: %s\n"+
+					"  name: %s\n",
+				region, *instance.InstanceId, getEC2Name(instance))
 		}
 	}
 	return ret, nil
@@ -222,7 +233,9 @@ func ec2_instance_private(region string, sess *session.Session, ips []string) (m
 			ret[*instance.PrivateIpAddress] = fmt.Sprintf(
 				"  type: ec2_instance\n"+
 					"  region: %s\n"+
-					"  id: %s\n", region, *instance.InstanceId)
+					"  id: %s\n"+
+					"  name: %s\n",
+				region, *instance.InstanceId, getEC2Name(instance))
 		}
 	}
 	return ret, nil
