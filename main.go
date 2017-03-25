@@ -6,6 +6,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"os/exec"
+	"strings"
 )
 
 var (
@@ -67,8 +69,28 @@ func main() {
 				fmt.Print(ip + ":\n" + str)
 			}
 		}
-
 	}
+
+
+	keys := make([]string, len(foundIps))
+	i := 0
+	for k := range foundIps {
+		 keys[i] = k
+		 i++
+	}
+
+	found, err := unknown(keys)
+	if err != nil {
+		if *verbose {
+			fmt.Println(err)
+		}
+	} else {
+		for ip, str := range found {
+			delete(foundIps, ip)
+			fmt.Print(ip + ":\n" + str)
+		}
+	}
+
 	for ip := range foundIps {
 		fmt.Printf("%s:\n", ip)
 	}
@@ -109,7 +131,32 @@ func eip(region string, sess *session.Session, ips []string) (map[string]string,
 	return ret, nil
 }
 
-func unknown(ip string) {}
+func toptr(ip string) string {
+	parts := strings.Split(ip, ".")
+
+	ret := ""
+	for i := len(parts) - 1; i > 0; i-- {
+		ret += parts[i] + "."
+	}
+	ret += parts[0] + ".in-addr.arpa"
+
+	return ret
+}
+
+func unknown(ips []string) (map[string]string, error) {
+	ret := make(map[string]string)
+	for _, ip := range ips {
+		cmd := exec.Command("dig", "+short", toptr(ip), "PTR")
+		stdoutStderr, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, err
+		}
+		ret[ip] = fmt.Sprintf(
+			"  type: unknown\n"+
+				"  ptr: %s\n", stdoutStderr)
+	}
+	return ret, nil
+}
 
 func ec2_instance_public(region string, sess *session.Session, ips []string) (map[string]string, error) {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
