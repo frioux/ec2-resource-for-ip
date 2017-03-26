@@ -101,7 +101,7 @@ func main() {
 				return err
 			})
 			g.Go(func() error {
-				found, err := find_elb(region, sess, ips)
+				found, err := find_elb(region, sess, ctx, g, ips)
 				for k, v := range found {
 					results[k] = v
 				}
@@ -140,11 +140,18 @@ func main() {
 	}
 }
 
-func find_elb(region string, sess *session.Session, ips []string) (map[string]string, error) {
-	svc := elb.New(sess, &aws.Config{Region: aws.String(region)})
+type in struct {
+	name    string
+	dnsName string
+}
 
-	// map of ip to elb-id
-	lookup := make(map[string]string)
+type out struct {
+	name string
+	ip   string
+}
+
+func find_elb(region string, sess *session.Session, ctx context.Context, g *errgroup.Group, ips []string) (map[string]string, error) {
+	svc := elb.New(sess, &aws.Config{Region: aws.String(region)})
 
 	resp, err := svc.DescribeLoadBalancers(nil)
 
@@ -152,21 +159,46 @@ func find_elb(region string, sess *session.Session, ips []string) (map[string]st
 		return nil, err
 	}
 
+	dnsToLookup := make(chan in)
+	c := make(chan out)
+
 	for _, lb := range resp.LoadBalancerDescriptions {
-		ips, err := net.LookupIP(*lb.DNSName)
+		dnsToLookup <- in{*lb.LoadBalancerName, *lb.DNSName}
+	}
+	const numDigesters = 5
+	for i := 0; i < numDigesters; i++ {
+		g.Go(func() error {
+			for nameAndDns := range dnsToLookup {
+				ips, err := net.LookupIP(nameAndDns.dnsName)
 
-		// This happens all the time; do not early exit
-		if err != nil {
-			if *verbose {
-				fmt.Println(err)
+				// This happens all the time; do not early exit
+				if err != nil {
+					if *verbose {
+						fmt.Println(err)
+					}
+					continue
+				}
+				for _, ip := range ips {
+					select {
+					case c <- out{nameAndDns.name, ip.String()}:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
 			}
-			continue
-		}
+			return nil
+		})
+	}
+	go func() {
+		g.Wait()
+		close(c)
+	}()
 
-		name := *lb.LoadBalancerName
-		for _, ip := range ips {
-			lookup[ip.String()] = name
-		}
+	// map of ip to elb-id
+	lookup := make(map[string]string)
+
+	for r := range c {
+		lookup[r.ip] = r.name
 	}
 
 	ret := make(map[string]string)
