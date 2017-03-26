@@ -7,6 +7,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elb"
+	"golang.org/x/net/context"
+	"golang.org/x/sync/errgroup"
 	"net"
 	"os/exec"
 	"strings"
@@ -16,17 +18,17 @@ var (
 	verbose = flag.Bool("verbose", false, "Never stop talking")
 )
 
-func showResults (found map[string]string, err error, foundIps *map[string]bool) {
-		if err != nil {
-			if *verbose {
-				fmt.Println(err)
-			}
-		} else {
-			for ip, str := range found {
-				delete(*foundIps, ip)
-				fmt.Print(ip + ":\n" + str)
-			}
+func showResults(found map[string]string, err error, foundIps *map[string]bool) {
+	if err != nil {
+		if *verbose {
+			fmt.Println(err)
 		}
+	} else {
+		for ip, str := range found {
+			delete(*foundIps, ip)
+			fmt.Print(ip + ":\n" + str)
+		}
+	}
 }
 
 func main() {
@@ -46,19 +48,47 @@ func main() {
 		foundIps[ip] = false
 	}
 
-	for _, region := range regions {
-		found, err := ec2_instance_public(region, sess, ips)
-		showResults(found, err, &foundIps)
+	find_ips := func(ctx context.Context, ips []string) (map[string]string, error) {
+		g, ctx := errgroup.WithContext(ctx)
 
-		found, err = ec2_instance_private(region, sess, ips)
-		showResults(found, err, &foundIps)
+		results := make(map[string]string)
+		for _, region := range regions {
+			g.Go(func() error {
+				found, err := ec2_instance_public(region, sess, ips)
+				for k, v := range found {
+					results[k] = v
+				}
+				return err
+			})
+			g.Go(func() error {
+				found, err := ec2_instance_private(region, sess, ips)
+				for k, v := range found {
+					results[k] = v
+				}
+				return err
+			})
+			g.Go(func() error {
+				found, err := eip(region, sess, ips)
+				for k, v := range found {
+					results[k] = v
+				}
+				return err
+			})
+			g.Go(func() error {
+				found, err := find_elb(region, sess, ips)
+				for k, v := range found {
+					results[k] = v
+				}
+				return err
+			})
+		}
 
-		found, err = eip(region, sess, ips)
-		showResults(found, err, &foundIps)
-
-		found, err = find_elb(region, sess, ips)
-		showResults(found, err, &foundIps)
+		err := g.Wait()
+		return results, err
 	}
+
+	results, err := find_ips(context.Background(), ips)
+	showResults(results, err, &foundIps)
 
 	keys := make([]string, len(foundIps))
 	i := 0
