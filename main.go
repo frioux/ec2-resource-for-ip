@@ -31,6 +31,22 @@ func showResults(found map[string]string, err error, foundIps *map[string]bool) 
 	}
 }
 
+func allRegions(sess *session.Session) ([]string, error) {
+	svc := ec2.New(sess, &aws.Config{Region: aws.String("us-west-1")})
+
+	ret := []string{}
+
+	resp, err := svc.DescribeRegions(nil)
+	if err != nil {
+		return []string{"us-west-1", "us-east-1", "us-west-2"}, err
+	}
+
+	for _, region := range resp.Regions {
+		ret = append(ret, *region.RegionName)
+	}
+	return ret, nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -39,7 +55,15 @@ func main() {
 		panic(err)
 	}
 
-	regions := []string{"us-west-1", "us-east-1"}
+	regions, err := allRegions(sess)
+	if *verbose {
+		fmt.Println("Checking", regions)
+	}
+	if err != nil {
+		if *verbose {
+			fmt.Println(err)
+		}
+	}
 
 	ips := flag.Args()
 
@@ -53,6 +77,8 @@ func main() {
 
 		results := make(map[string]string)
 		for _, region := range regions {
+			region := region
+
 			g.Go(func() error {
 				found, err := ec2_instance_public(region, sess, ips)
 				for k, v := range found {
