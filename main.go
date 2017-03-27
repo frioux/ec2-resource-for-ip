@@ -10,7 +10,6 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/sync/errgroup"
 	"net"
-	"os/exec"
 	"strings"
 )
 
@@ -230,14 +229,16 @@ func toptr(ip string) string {
 func unknown(ips []string) (map[string]string, error) {
 	ret := make(map[string]string)
 	for _, ip := range ips {
-		cmd := exec.Command("dig", "+short", toptr(ip), "PTR")
-		stdoutStderr, err := cmd.CombinedOutput()
+		ptrs, err := net.LookupAddr(ip)
 		if err != nil {
-			return nil, err
+			if *verbose {
+				fmt.Println(err)
+			}
+			ptrs = []string{""}
 		}
 		ret[ip] = fmt.Sprintf(
 			"  type: unknown\n"+
-				"  ptr: %s\n", stdoutStderr)
+				"  ptr: %s\n", ptrs[0])
 	}
 	return ret, nil
 }
