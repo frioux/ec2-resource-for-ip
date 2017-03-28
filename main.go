@@ -206,6 +206,9 @@ func eip(region string, sess *session.Session, ips []string) (map[string]string,
 	ret := make(map[string]string)
 	for _, address := range resp.Addresses {
 		id := address.AllocationId
+		if id == nil {
+			continue
+		}
 		ret[*address.PublicIp] = fmt.Sprintf(
 			"  type: eip\n"+
 				"  region: %s\n"+
