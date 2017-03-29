@@ -11,11 +11,19 @@ import (
 	"golang.org/x/sync/errgroup"
 	"net"
 	"strings"
+	"sync"
 )
 
 var (
 	verbose = flag.Bool("verbose", false, "Never stop talking")
 )
+
+type elbLookup struct {
+	name string
+
+	err error
+	result string
+}
 
 func showResults(found map[string]string, err error, foundIps *map[string]bool) {
 	if err != nil {
@@ -151,22 +159,50 @@ func find_elb(region string, sess *session.Session, ips []string) (map[string]st
 		return nil, err
 	}
 
-	for _, lb := range resp.LoadBalancerDescriptions {
-		ips, err := net.LookupIP(*lb.DNSName)
+	in := make(chan elbLookup)
+	out := make(chan elbLookup)
+	var wg sync.WaitGroup
 
-		// This happens all the time; do not early exit
-		if err != nil {
-			if *verbose {
-				fmt.Println(err)
+	wg.Add(1)
+
+	go func() {
+		for _, lb := range resp.LoadBalancerDescriptions {
+			in <- elbLookup{name: *lb.DNSName}
+		}
+		wg.Done()
+	}()
+
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			for l := range in {
+				ips, err := net.LookupIP(l.name)
+				if err != nil {
+					out <- elbLookup{name: l.name, err: err}
+					l.err = err
+				} else {
+					for _, ip := range ips {
+						out <- elbLookup{name: l.name, result: ip.String()}
+					}
+				}
 			}
-			continue
-		}
-
-		name := *lb.LoadBalancerName
-		for _, ip := range ips {
-			lookup[ip.String()] = name
-		}
+			wg.Done()
+		}()
 	}
+
+	go func() {
+		for l := range out {
+			// This happens all the time; do not early exit
+			if l.err != nil {
+				if *verbose {
+					fmt.Println(l.err)
+				}
+				continue
+			}
+
+			lookup[l.result] = l.name
+		}
+	}()
 
 	ret := make(map[string]string)
 	for _, ip := range ips {
