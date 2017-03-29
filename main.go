@@ -7,27 +7,19 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elb"
-	"golang.org/x/net/context"
-	"golang.org/x/sync/errgroup"
 	"net"
 	"strings"
+	"sync"
 )
 
 var (
 	verbose = flag.Bool("verbose", false, "Never stop talking")
 )
 
-func showResults(found map[string]string, err error, foundIps *map[string]bool) {
-	if err != nil {
-		if *verbose {
-			fmt.Println(err)
-		}
-	} else {
-		for ip, str := range found {
-			delete(*foundIps, ip)
-			fmt.Print(ip + ":\n" + str)
-		}
-	}
+type ipLookup struct {
+	name string
+	result string
+	err error
 }
 
 func allRegions(sess *session.Session) ([]string, error) {
@@ -66,54 +58,86 @@ func main() {
 
 	ips := flag.Args()
 
+	out := make(chan ipLookup)
+	errC := make(chan error)
+
+	done := make(chan bool)
+
+	var wg sync.WaitGroup
+	var workerWg sync.WaitGroup
+
+	wg.Add(len(ips))
+	workerWg.Add(1)
 	foundIps := make(map[string]bool)
 	for _, ip := range ips {
 		foundIps[ip] = false
 	}
 
-	find_ips := func(ctx context.Context, ips []string) (map[string]string, error) {
-		g, ctx := errgroup.WithContext(ctx)
+	go func() {
+		workerWg.Wait()
+		close(done)
+	}()
 
-		results := make(map[string]string)
-		for _, region := range regions {
-			region := region
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-			g.Go(func() error {
-				found, err := ec2_instance_public(region, sess, ips)
-				for k, v := range found {
-					results[k] = v
+	go func() {
+		for err := range errC {
+			if err != nil {
+				if *verbose {
+					fmt.Println(err)
 				}
-				return err
-			})
-			g.Go(func() error {
-				found, err := ec2_instance_private(region, sess, ips)
-				for k, v := range found {
-					results[k] = v
-				}
-				return err
-			})
-			g.Go(func() error {
-				found, err := eip(region, sess, ips)
-				for k, v := range found {
-					results[k] = v
-				}
-				return err
-			})
-			g.Go(func() error {
-				found, err := find_elb(region, sess, ips)
-				for k, v := range found {
-					results[k] = v
-				}
-				return err
-			})
+			}
 		}
+	}()
 
-		err := g.Wait()
-		return results, err
+	go func() {
+		for i := range out {
+			if i.err != nil {
+				if *verbose {
+					fmt.Println(i.err)
+				}
+			} else {
+				delete(foundIps, i.name)
+				fmt.Print(i.name + ":\n" + i.result)
+			}
+			// XXX: need to verify that the thing found actually deleted a
+			// record, or something
+			wg.Done()
+		}
+	}()
+
+	for _, region := range regions {
+		region := region
+
+		go func() {
+			workerWg.Add(1)
+			errC <- ec2_instance_public(region, sess, ips, out)
+			workerWg.Done()
+		}()
+		go func() {
+			workerWg.Add(1)
+			errC <- ec2_instance_private(region, sess, ips, out)
+			workerWg.Done()
+		}()
+		go func() {
+			workerWg.Add(1)
+			errC <- eip(region, sess, ips, out)
+			workerWg.Done()
+		}()
+		go func() {
+			workerWg.Add(1)
+			errC <- find_elb(region, sess, ips, errC, out)
+			workerWg.Done()
+		}()
 	}
+	workerWg.Done()
 
-	results, err := find_ips(context.Background(), ips)
-	showResults(results, err, &foundIps)
+	for range done {
+
+	}
 
 	keys := make([]string, len(foundIps))
 	i := 0
@@ -139,7 +163,7 @@ func main() {
 	}
 }
 
-func find_elb(region string, sess *session.Session, ips []string) (map[string]string, error) {
+func find_elb(region string, sess *session.Session, ips []string, errC chan error, out chan ipLookup) error {
 	svc := elb.New(sess, &aws.Config{Region: aws.String(region)})
 
 	// map of ip to elb-id
@@ -148,7 +172,7 @@ func find_elb(region string, sess *session.Session, ips []string) (map[string]st
 	resp, err := svc.DescribeLoadBalancers(nil)
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	for _, lb := range resp.LoadBalancerDescriptions {
@@ -156,9 +180,7 @@ func find_elb(region string, sess *session.Session, ips []string) (map[string]st
 
 		// This happens all the time; do not early exit
 		if err != nil {
-			if *verbose {
-				fmt.Println(err)
-			}
+			errC <- err
 			continue
 		}
 
@@ -168,20 +190,22 @@ func find_elb(region string, sess *session.Session, ips []string) (map[string]st
 		}
 	}
 
-	ret := make(map[string]string)
 	for _, ip := range ips {
 		if name, ok := lookup[ip]; ok {
-			ret[ip] = fmt.Sprintf(
-				"  type: elb\n"+
-					"  region: %s\n"+
-					"  name: %s\n", region, name)
+			out <- ipLookup{
+				name: ip,
+				result: fmt.Sprintf(
+					"  type: elb\n"+
+						"  region: %s\n"+
+						"  name: %s\n", region, name),
+			}
 		}
 	}
 
-	return ret, nil
+	return nil
 }
 
-func eip(region string, sess *session.Session, ips []string) (map[string]string, error) {
+func eip(region string, sess *session.Session, ips []string, out chan ipLookup) error {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
 
 	awsIps := []*string{}
@@ -200,21 +224,23 @@ func eip(region string, sess *session.Session, ips []string) (map[string]string,
 
 	resp, err := svc.DescribeAddresses(params)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	ret := make(map[string]string)
 	for _, address := range resp.Addresses {
 		id := address.AllocationId
 		if id == nil {
 			continue
 		}
-		ret[*address.PublicIp] = fmt.Sprintf(
-			"  type: eip\n"+
-				"  region: %s\n"+
-				"  id: %s\n", region, *id)
+		out <- ipLookup{
+			name: *address.PublicIp,
+			result: fmt.Sprintf(
+				"  type: eip\n"+
+					"  region: %s\n"+
+					"  id: %s\n", region, *id),
+		}
 	}
-	return ret, nil
+	return nil
 }
 
 func toptr(ip string) string {
@@ -255,7 +281,7 @@ func getEC2Name(i *ec2.Instance) string {
 	return ""
 }
 
-func ec2_instance_public(region string, sess *session.Session, ips []string) (map[string]string, error) {
+func ec2_instance_public(region string, sess *session.Session, ips []string, out chan ipLookup) error {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
 
 	awsIps := []*string{}
@@ -274,25 +300,26 @@ func ec2_instance_public(region string, sess *session.Session, ips []string) (ma
 	resp, err := svc.DescribeInstances(params)
 
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	ret := make(map[string]string)
 
 	for _, res := range resp.Reservations {
 		for _, instance := range res.Instances {
-			ret[*instance.PublicIpAddress] = fmt.Sprintf(
+			out <- ipLookup{
+				name: *instance.PublicIpAddress,
+				result: fmt.Sprintf(
 				"  type: ec2_instance\n"+
 					"  region: %s\n"+
 					"  id: %s\n"+
 					"  name: %s\n",
-				region, *instance.InstanceId, getEC2Name(instance))
+				region, *instance.InstanceId, getEC2Name(instance)),
+			}
 		}
 	}
-	return ret, nil
+	return nil
 }
 
-func ec2_instance_private(region string, sess *session.Session, ips []string) (map[string]string, error) {
+func ec2_instance_private(region string, sess *session.Session, ips []string, out chan ipLookup) error {
 	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
 
 	awsIps := []*string{}
@@ -311,20 +338,21 @@ func ec2_instance_private(region string, sess *session.Session, ips []string) (m
 	resp, err := svc.DescribeInstances(params)
 
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	ret := make(map[string]string)
 
 	for _, res := range resp.Reservations {
 		for _, instance := range res.Instances {
-			ret[*instance.PrivateIpAddress] = fmt.Sprintf(
+			out <- ipLookup{
+				name: *instance.PrivateIpAddress,
+				result: fmt.Sprintf(
 				"  type: ec2_instance\n"+
 					"  region: %s\n"+
 					"  id: %s\n"+
 					"  name: %s\n",
-				region, *instance.InstanceId, getEC2Name(instance))
+				region, *instance.InstanceId, getEC2Name(instance)),
+			}
 		}
 	}
-	return ret, nil
+	return nil
 }
